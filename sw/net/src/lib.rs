@@ -28,6 +28,7 @@ const MIN_UDP_FRAME_LEN: usize = IPV4_MIN_FRAME_LEN + UDP_HEADER_LEN;
 // Ethertypes for Ethernet MAC header
 const ETHERTYPE_IPV4: &[u8] = &[0x08, 0x00];
 const ETHERTYPE_ARP: &[u8] = &[0x08, 0x06];
+const ETHERTYPE_IPV6: &[u8] = &[0x86, 0xDD];
 
 /// Holds network stack state such as DHCP client state, addresses, and diagnostic stats
 pub struct NetState {
@@ -116,10 +117,26 @@ pub fn handle_frame(mut net_state: &mut NetState, data: &[u8]) -> FilterBin {
     let filter_bin = match ethertype {
         ETHERTYPE_IPV4 => handle_ipv4_frame(&mut net_state, data),
         ETHERTYPE_ARP => handle_arp_frame(&net_state, data),
+        ETHERTYPE_IPV6 => handle_ipv6_frame(data),
         _ => FilterBin::DropEType,
     };
     net_state.filter_stats.inc_count_for(filter_bin);
     return filter_bin;
+}
+
+/// The EC has no IPv6 stack of its own: forward IPv6 to the host (the SoC's
+/// smoltcp does neighbor discovery, multicast group filtering, etc.), except
+/// the high-volume LAN chatter groups (mDNS/LLMNR/SSDP), which mirror the v4
+/// mDNS drop above — they'd otherwise wake the SoC constantly.
+fn handle_ipv6_frame(data: &[u8]) -> FilterBin {
+    const MAC_MDNS_V6: &[u8] = &[0x33, 0x33, 0x00, 0x00, 0x00, 0xFB];
+    const MAC_LLMNR_V6: &[u8] = &[0x33, 0x33, 0x00, 0x01, 0x00, 0x03];
+    const MAC_SSDP_V6: &[u8] = &[0x33, 0x33, 0x00, 0x00, 0x00, 0x0C];
+    let dest_mac = &data[..6];
+    if dest_mac == MAC_MDNS_V6 || dest_mac == MAC_LLMNR_V6 || dest_mac == MAC_SSDP_V6 {
+        return FilterBin::DropMulti;
+    }
+    FilterBin::ComFwd
 }
 
 fn log_hex(s: &[u8]) {
